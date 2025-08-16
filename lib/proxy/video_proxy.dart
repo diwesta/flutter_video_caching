@@ -12,7 +12,7 @@ import 'local_proxy_server.dart';
 /// HLS playlist parser, download manager, and URL matcher for video streaming and caching.
 class VideoProxy {
   /// The local HTTP proxy server instance.
-  static late LocalProxyServer _localProxyServer;
+  static late LocalProxyServer localProxyServer;
 
   /// HLS playlist parser instance for parsing HLS playlists.
   static late HlsPlaylistParser hlsPlaylistParser;
@@ -57,8 +57,8 @@ class VideoProxy {
     Config.logPrint = logPrint;
 
     // Initialize and start the local proxy server.
-    _localProxyServer = LocalProxyServer(ip: ip, port: port);
-    await _localProxyServer.start();
+    localProxyServer = LocalProxyServer(ip: ip, port: port);
+    await localProxyServer.start();
 
     // Create the HLS playlist parser instance.
     hlsPlaylistParser = HlsPlaylistParser.create();
@@ -71,5 +71,11 @@ class VideoProxy {
 
     // Set the HTTP client builder
     httpClientBuilderImpl = httpClientBuilder ?? HttpClientDefault();
+  }
+
+  /// Restarts the local proxy server.
+  static Future<void> restartProxy() async {
+    await localProxyServer.close();
+    await localProxyServer.start();
   }
 }
