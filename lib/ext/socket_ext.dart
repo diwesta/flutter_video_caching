@@ -5,52 +5,68 @@ import '../ext/log_ext.dart';
 /// HTTP request terminator sequence, used to indicate the end of HTTP headers.
 const String httpTerminal = '\r\n\r\n';
 
+/// Safe per-write size to avoid iOS send-buffer issues (~97.7 KB).
+const int _chunk = 100000;
+
 /// Extension on the [Socket] class to provide additional utility methods.
 extension SocketExtension on Socket {
+  /// Configure Darwin (iOS/macOS) sockets to avoid SIGPIPE on writes.
+  void configureForApple() {
+    if (Platform.isIOS || Platform.isMacOS) {
+      // SO_NOSIGPIPE = 0x1022 on Darwin
+      setRawOption(
+        RawSocketOption.fromInt(RawSocketOption.levelSocket, 0x1022, 1),
+      );
+    }
+  }
+
   /// Appends data to the socket.
   ///
-  /// - If [data] is a [String], it writes the string followed by the HTTP terminal sequence.
-  /// - If [data] is a [Stream<List<int>>], it adds the stream to the socket.
-  /// - If [data] is a [List<int>]:
-  ///   - On iOS, if the data length is greater than 100,000 bytes, it splits the data into chunks of 100,000 bytes,
-  ///     sending each chunk with a 10ms delay to avoid potential issues with large data writes.
-  ///   - On other platforms, it writes the entire data at once.
+  /// - String: writes string + HTTP terminal then flushes.
+  /// - Stream<List<int>>: pipes stream then flushes.
+  /// - List<int>: on iOS, writes in chunks with flush between chunks; otherwise writes once and flushes.
   ///
-  /// Returns `true` if the operation succeeds, otherwise logs a warning and returns `false`.
+  /// Returns `true` if the operation succeeds; logs and returns `false` on error.
   Future<bool> append(Object data) async {
     try {
       if (data is String) {
-        // Write string data with HTTP terminal.
         write('$data$httpTerminal');
-      } else if (data is Stream<List<int>>) {
-        // Add stream data to the socket.
+        await flush();
+        return true;
+      }
+
+      if (data is Stream<List<int>>) {
         await addStream(data);
-      } else if (data is List<int>) {
+        await flush();
+        return true;
+      }
+
+      if (data is List<int>) {
         if (Platform.isIOS) {
-          // On iOS, split large data into chunks to avoid issues.
-          if (data.length <= 100000) {
-            add(data);
-          } else {
-            int startIndex = 0, endIndex = 100000;
-            while (startIndex < data.length) {
-              add(data.sublist(startIndex, endIndex));
-              await Future.delayed(Duration(milliseconds: 10));
-              startIndex = endIndex;
-              endIndex += 100000;
-              if (endIndex > data.length) {
-                endIndex = data.length;
-              }
-            }
+          for (int start = 0; start < data.length; start += _chunk) {
+            final int end = (start + _chunk <= data.length)
+                ? start + _chunk
+                : data.length;
+            add(data.sublist(start, end));
+            await flush(); // surfaces write errors here instead of SIGPIPE
+            await Future.delayed(
+              const Duration(milliseconds: 10),
+            ); // small yield
           }
         } else {
-          // On other platforms, write all data at once.
           add(data);
+          await flush();
         }
+        return true;
       }
-      return true;
-    } catch (e) {
-      // Log a warning if the socket is closed or an error occurs.
-      logW("Socket closed: $e, can't append data");
+
+      // Unknown type
+      logW('append: unsupported data type ${data.runtimeType}');
+      return false;
+    } catch (e, st) {
+      // If SO_NOSIGPIPE is not set on iOS/macOS and peer closed, the process may be killed before this.
+      // Call `socket.configureForApple()` right after creating the socket.
+      logW("Socket closed: $e, can't append data\n$st");
       return false;
     }
   }
